@@ -44,8 +44,10 @@ if __name__ == "__main__":
     model = YOLO(args.model)
     
     if torch.cuda.is_available():
+        print("Using CUDA for training.")
         device = "cuda"
     else:
+        print("Using CPU for training.")
         device = "cpu"
     
     model.train(
