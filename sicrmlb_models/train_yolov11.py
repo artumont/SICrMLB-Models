@@ -1,3 +1,4 @@
+import torch
 import argparse
 from ultralytics import YOLO  # type: ignore
 
@@ -42,10 +43,16 @@ if __name__ == "__main__":
     
     model = YOLO(args.model)
     
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    
     model.train(
         data=args.data,
         epochs=args.epochs,
         batch=args.batch_size,
         imgsz=120,
+        device=device,
         name=args.name,
     )
