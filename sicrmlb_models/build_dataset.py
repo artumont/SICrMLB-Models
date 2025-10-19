@@ -111,8 +111,8 @@ def worker_task(
     """Worker task to process images and generate variants."""
     for img_path in paths:
         try:
-            img_out_path = output_dir / "train"
-            label_out_path = output_dir / "labels"
+            img_out_path = output_dir / "images" / "train"
+            label_out_path = output_dir / "labels" / "train"
             processed_img = letterbox_image(img_path, NORMALIZED_IMAGE_SIZE)
 
             ensure_dir(img_out_path)
@@ -212,8 +212,8 @@ def build_data_yaml(
         )
         num_classes = len(class_names)
 
-    train_path = (output_dir / train_subdir).as_posix()
-    val_path = (output_dir / val_subdir).as_posix()
+    train_path = (output_dir / "images" / train_subdir).as_posix()
+    val_path = (output_dir / "images" / val_subdir).as_posix()
     names_list = ", ".join(f"'{normalize_string(n)}'" for n in class_names)
 
     yaml_content = (
@@ -227,28 +227,38 @@ def build_data_yaml(
     yaml_path.write_text(yaml_content)
     logger.info("Wrote dataset yaml to %s", yaml_path)
 
+
 def generate_synthetic_val(
     raw_data_path: Path,
     output_dir: Path,
     label_map: Dict[str, int],
     n_samples: int = 200,
-    canvas_size: tuple[int, int] = (int(NORMALIZED_IMAGE_SIZE.width), int(NORMALIZED_IMAGE_SIZE.height)),
+    canvas_size: tuple[int, int] = (
+        int(NORMALIZED_IMAGE_SIZE.width),
+        int(NORMALIZED_IMAGE_SIZE.height),
+    ),
     scale_range: tuple[float, float] = (0.3, 0.9),
     use_real_bgs: Path | None = None,
 ) -> int:
     """Generate synthetic validation samples by pasting card images onto random or real backgrounds."""
-    ensure_dir(output_dir / "val")
-    ensure_dir(output_dir / "labels")
+    ensure_dir(output_dir / "images" / "val")
+    ensure_dir(output_dir / "labels" / "val")
 
     # collect card images
-    cards = [p for p in raw_data_path.rglob("*.jpg")] + [p for p in raw_data_path.rglob("*.png")]
+    cards = [p for p in raw_data_path.rglob("*.jpg")] + [
+        p for p in raw_data_path.rglob("*.png")
+    ]
     if not cards:
-        logger.warning("No card images found in %s, skipping synthetic generation.", raw_data_path)
+        logger.warning(
+            "No card images found in %s, skipping synthetic generation.", raw_data_path
+        )
         return 0
 
     real_bgs = []
     if use_real_bgs and use_real_bgs.exists():
-        real_bgs = [p for p in use_real_bgs.rglob("*.jpg")] + [p for p in use_real_bgs.rglob("*.png")]
+        real_bgs = [p for p in use_real_bgs.rglob("*.jpg")] + [
+            p for p in use_real_bgs.rglob("*.png")
+        ]
 
     cw, ch = int(canvas_size[0]), int(canvas_size[1])
     written = 0
@@ -260,7 +270,11 @@ def generate_synthetic_val(
                 bg_path = random.choice(real_bgs)
                 with PILImage.open(bg_path) as bg_img:
                     bg = bg_img.convert("RGB")
-                    bg = PILImage.Image.resize(bg, (cw, ch)) if hasattr(PILImage.Image, "resize") else bg.resize((cw,ch))
+                    bg = (
+                        PILImage.Image.resize(bg, (cw, ch))
+                        if hasattr(PILImage.Image, "resize")
+                        else bg.resize((cw, ch))
+                    )
                     bg = PILImage.new("RGB", (cw, ch))
             else:
                 arr = (np.random.rand(ch, cw, 3) * 255).astype(np.uint8)
@@ -283,7 +297,9 @@ def generate_synthetic_val(
 
                 # optional small rotation
                 if random.random() < 0.3:
-                    card_resized = card_resized.rotate(random.uniform(-10, 10), expand=True)
+                    card_resized = card_resized.rotate(
+                        random.uniform(-10, 10), expand=True
+                    )
 
                 # ensure fits, recompute dims
                 nw, nh = card_resized.size
@@ -314,7 +330,11 @@ def generate_synthetic_val(
                     # fallback to infer_label_name
                     classname = infer_label_name(card_path)
                     if classname not in label_map:
-                        logger.debug("Skipping card %s; class %s not in label_map", card_path, classname)
+                        logger.debug(
+                            "Skipping card %s; class %s not in label_map",
+                            card_path,
+                            classname,
+                        )
                         continue
                 class_id = label_map[classname]
 
@@ -329,11 +349,13 @@ def generate_synthetic_val(
                 h_norm = (y_max - y_min) / ch
 
                 fname = f"syn_val_{i:06d}.jpg"
-                img_path = output_dir / "val" / fname
-                lbl_path = output_dir / "labels" / (Path(fname).stem + ".txt")
+                img_path = output_dir / "images" / "val" / fname
+                lbl_path = output_dir / "labels" / "val" / (Path(fname).stem + ".txt")
 
                 canvas_rgb.save(img_path, quality=90)
-                lbl_path.write_text(f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n")
+                lbl_path.write_text(
+                    f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n"
+                )
 
                 written += 1
 
@@ -341,15 +363,18 @@ def generate_synthetic_val(
             logger.debug("Failed to create synthetic sample %d: %s", i, ex)
             continue
 
-    logger.info("Generated %d synthetic validation samples at %s", written, output_dir / "val")
+    logger.info(
+        "Generated %d synthetic validation samples at %s", written, output_dir / "val"
+    )
     return written
+
 
 def build_dataset(
     dataset_name: str,
     raw_data_path: Path,
     output_dir: Path,
     num_workers: int = 4,
-) -> None: 
+) -> None:
     """Build dataset from raw images located in raw_data_path and save to output_dir."""
     logger.info(f"Building dataset '{dataset_name}' from raw data at {raw_data_path}")
 
@@ -363,8 +388,8 @@ def build_dataset(
     load = list(raw_data_path.rglob("*.jpg")) + list(raw_data_path.rglob("*.png"))
     balanced_load = balance_load(load, num_workers)
 
-    ensure_dir(output_dir / "train")
-    ensure_dir(output_dir / "labels")
+    ensure_dir(output_dir / "images" / "train")
+    ensure_dir(output_dir / "labels" / "train")
 
     worker_threads = []
     for worker_idx, image_paths in enumerate(balanced_load):
@@ -391,16 +416,16 @@ def build_dataset(
     )
 
     logger.info(f"Data YAML file created at {output_dir / 'data.yaml'}")
-    
+
     generate_synthetic_val(
         raw_data_path,
         output_dir,
         label_map,
         n_samples=200,
     )
-    
+
     logger.info(f"Synthetic validation data generated at {output_dir / 'val'}")
-    
+
     logger.info(f"Dataset '{dataset_name}' built successfully at {output_dir}")
 
 
