@@ -26,6 +26,7 @@ IMAGE_VARIANTS = [
 
 
 def letterbox_image(image_path: Path, target_size: ImageSize) -> Image:
+    """Resize image with unchanged aspect ratio using padding."""
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
@@ -58,6 +59,7 @@ def normalize_string(s: str) -> str:
 
 
 def infer_label_name(img_path: Path) -> str:
+    """Infer label name from image path by checking prefix or parent folder."""
     stem = normalize_string(img_path.stem)
     if "_" in stem:
         return stem.split("_", 1)[0]
@@ -66,6 +68,7 @@ def infer_label_name(img_path: Path) -> str:
 
 
 def build_label_map(raw_data_path: Path, use_fullname: bool = True) -> Dict[str, int]:
+    """Build label map from raw data directory."""
     image_paths = list(raw_data_path.rglob("*.jpg")) + list(
         raw_data_path.rglob("*.png")
     )
@@ -82,6 +85,7 @@ def build_label_map(raw_data_path: Path, use_fullname: bool = True) -> Dict[str,
 
 
 def resolve_class_name(img_path: Path, label_map: Dict[str, int]) -> str:
+    """Resolve class name for an image using label_map."""
     candidates = [
         normalize_string(img_path.stem),  # full image name
         infer_label_name(img_path),  # prefix or parent folder
@@ -104,6 +108,7 @@ def worker_task(
     label_map: Dict[str, int],
     variants: list[Variants] = IMAGE_VARIANTS,
 ) -> None:
+    """Worker task to process images and generate variants."""
     for img_path in paths:
         try:
             img_out_path = output_dir / "train"
@@ -198,6 +203,7 @@ def build_data_yaml(
     train_subdir: str = "train",
     val_subdir: str = "val",
 ) -> None:
+    """Builds a data.yaml file for the dataset."""
     if num_classes != len(class_names):
         logger.warning(
             "num_classes (%d) does not match length of class_names (%d). Using len(class_names).",
@@ -230,6 +236,7 @@ def generate_synthetic_val(
     scale_range: tuple[float, float] = (0.3, 0.9),
     use_real_bgs: Path | None = None,
 ) -> int:
+    """Generate synthetic validation samples by pasting card images onto random or real backgrounds."""
     ensure_dir(output_dir / "val")
     ensure_dir(output_dir / "labels")
 
@@ -342,7 +349,8 @@ def build_dataset(
     raw_data_path: Path,
     output_dir: Path,
     num_workers: int = 4,
-) -> None:
+) -> None: 
+    """Build dataset from raw images located in raw_data_path and save to output_dir."""
     logger.info(f"Building dataset '{dataset_name}' from raw data at {raw_data_path}")
 
     label_map = build_label_map(raw_data_path)
