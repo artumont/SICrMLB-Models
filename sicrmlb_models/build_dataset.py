@@ -113,15 +113,16 @@ def worker_task(
         try:
             img_out_path = output_dir / "images" / "train"
             label_out_path = output_dir / "labels" / "train"
-            processed_img = letterbox_image(img_path, NORMALIZED_IMAGE_SIZE)
 
             ensure_dir(img_out_path)
             ensure_dir(label_out_path)
 
-            if not processed_img:
-                logger.warning(
-                    f"Worker {worker_id} could not process image: {img_path}"
-                )
+            # open source card
+            try:
+                with PILImage.open(img_path) as src:
+                    card = src.convert("RGBA")
+            except Exception as e_open:
+                logger.warning(f"Worker {worker_id} could not open image {img_path}: {e_open}")
                 continue
 
             # determine class id (resolve using image name first)
@@ -134,63 +135,78 @@ def worker_task(
                 continue
             class_id = label_map[class_name]
 
-            # Generate and save variants (use Path / filename)
-            if Variants.BRIGHT in variants:
-                bright_img = PILImage.eval(
-                    processed_img, lambda x: min(255, int(x * 1.2))
-                )
-                bright_path = img_out_path / f"{img_path.stem}_bright{img_path.suffix}"
-                bright_img.save(bright_path)
-            if Variants.GRAYSCALE in variants:
-                gray_img = processed_img.convert("L").convert("RGB")
-                gray_path = img_out_path / f"{img_path.stem}_grayscale{img_path.suffix}"
-                gray_img.save(gray_path)
-            if Variants.CONTRAST in variants:
-                contrast_img = PILImage.eval(
-                    processed_img,
-                    lambda x: min(255, max(0, int(128 + 1.5 * (x - 128)))),
-                )
-                contrast_path = (
-                    img_out_path / f"{img_path.stem}_contrast{img_path.suffix}"
-                )
-                contrast_img.save(contrast_path)
-            if Variants.COMBINED in variants:
-                combined_img = PILImage.eval(
-                    processed_img,
-                    lambda x: min(255, max(0, int(128 + 1.5 * (x - 128) * 1.2))),
-                )
-                combined_path = (
-                    img_out_path / f"{img_path.stem}_combined{img_path.suffix}"
-                )
-                combined_img.save(combined_path)
+            cw = int(NORMALIZED_IMAGE_SIZE.width)
+            ch = int(NORMALIZED_IMAGE_SIZE.height)
+
+            # helper to place an RGBA image onto canvas at random position/rotation and save label
+            def place_and_save(stem: str, suffix: str, variant_img: PILImage.Image):
+                # scale the variant image randomly (keeps some variability)
+                scale = random.uniform(0.3, 0.95)
+                nw = max(1, int(round(variant_img.width * scale)))
+                nh = max(1, int(round(variant_img.height * scale)))
+                if nw > cw or nh > ch:
+                    fit_scale = min(cw / variant_img.width, ch / variant_img.height) * 0.95
+                    nw = max(1, int(round(variant_img.width * fit_scale)))
+                    nh = max(1, int(round(variant_img.height * fit_scale)))
+                placed = variant_img.resize((nw, nh), PILImage.Resampling.LANCZOS)
+
+                # optional small rotation
+                if random.random() < 0.3:
+                    placed = placed.rotate(random.uniform(-15, 15), expand=True)
+
+                nw, nh = placed.size
+                if nw >= cw:
+                    nw = cw - 1
+                if nh >= ch:
+                    nh = ch - 1
+
+                max_x = cw - nw
+                max_y = ch - nh
+                if max_x <= 0 or max_y <= 0:
+                    x = 0
+                    y = 0
+                else:
+                    x = random.randint(0, max_x)
+                    y = random.randint(0, max_y)
+
+                canvas = PILImage.new("RGB", (cw, ch), (114, 114, 114))
+                paste_img = placed.convert("RGBA")
+                canvas.paste(paste_img, (x, y), paste_img)
+
+                out_fname = f"{stem}{suffix}{img_path.suffix}"
+                out_img_path = img_out_path / out_fname
+                canvas.save(out_img_path, quality=90)
+
+                # compute bbox and write label in YOLO format
+                x_min, y_min = x, y
+                x_max, y_max = x + nw, y + nh
+                cx = (x_min + x_max) / 2.0 / cw
+                cy = (y_min + y_max) / 2.0 / ch
+                w_norm = (x_max - x_min) / cw
+                h_norm = (y_max - y_min) / ch
+
+                lbl_path = label_out_path / f"{stem}{suffix}.txt"
+                lbl_path.write_text(f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n")
+
+            stem = img_path.stem
+
+            # create and save each requested variant using random placement
             if Variants.ORIGINAL in variants:
-                original_path = (
-                    img_out_path / f"{img_path.stem}_original{img_path.suffix}"
-                )
-                processed_img.save(original_path)
+                place_and_save(stem, "_original", card)
+            if Variants.BRIGHT in variants:
+                bright = PILImage.eval(card.convert("RGB"), lambda v: min(255, int(v * 1.2))).convert("RGBA")
+                place_and_save(stem, "_bright", bright)
+            if Variants.GRAYSCALE in variants:
+                gray = card.convert("L").convert("RGBA")
+                place_and_save(stem, "_grayscale", gray)
+            if Variants.CONTRAST in variants:
+                contrast = PILImage.eval(card.convert("RGB"), lambda v: min(255, max(0, int(128 + 1.5 * (v - 128))))).convert("RGBA")
+                place_and_save(stem, "_contrast", contrast)
+            if Variants.COMBINED in variants:
+                combined = PILImage.eval(card.convert("RGB"), lambda v: min(255, max(0, int(128 + 1.5 * (v - 128) * 1.2)))).convert("RGBA")
+                place_and_save(stem, "_combined", combined)
 
             logger.info(f"Worker {worker_id} processed {img_path.stem} successfully.")
-
-            # Write label files (one per generated image variant) using numeric class id
-            def write_label(stem: str, suffix: str):
-                label_content = f"{class_id} 0.5 0.5 1.0 1.0"
-                label_file_path = label_out_path / f"{stem}{suffix}.txt"
-                label_file_path.write_text(label_content + "\n")
-
-            if Variants.ORIGINAL in variants:
-                write_label(img_path.stem, "_original")
-            if Variants.BRIGHT in variants:
-                write_label(img_path.stem, "_bright")
-            if Variants.GRAYSCALE in variants:
-                write_label(img_path.stem, "_grayscale")
-            if Variants.CONTRAST in variants:
-                write_label(img_path.stem, "_contrast")
-            if Variants.COMBINED in variants:
-                write_label(img_path.stem, "_combined")
-
-            logger.info(
-                f"Worker {worker_id} saved label for {img_path.stem} successfully."
-            )
 
         except Exception as e:
             logger.error(f"Worker {worker_id} failed to process {img_path}: {e}")
@@ -277,87 +293,113 @@ def generate_synthetic_val(
                     )
                     bg = PILImage.new("RGB", (cw, ch))
             else:
-                arr = (np.random.rand(ch, cw, 3) * 255).astype(np.uint8)
-                bg = PILImage.fromarray(arr)
+                bg = PILImage.new("RGB", (cw, ch), (114, 114, 114))
 
-            # choose card and prepare
-            card_path = random.choice(cards)
-            with PILImage.open(card_path) as cimg:
-                card = cimg.convert("RGBA")
+            # allow multiple cards per synthetic sample
+            num_cards = random.randint(1, 3)
 
-                # scale to fit canvas if needed
-                scale = random.uniform(*scale_range)
-                nw = max(1, int(round(card.width * scale)))
-                nh = max(1, int(round(card.height * scale)))
-                if nw > cw or nh > ch:
-                    fit_scale = min(cw / card.width, ch / card.height) * 0.95
-                    nw = max(1, int(round(card.width * fit_scale)))
-                    nh = max(1, int(round(card.height * fit_scale)))
-                card_resized = card.resize((nw, nh), PILImage.Resampling.LANCZOS)
+            # start canvas and paste background
+            canvas_rgb = PILImage.new("RGB", (cw, ch), (114, 114, 114))
+            canvas_rgb.paste(bg, (0, 0))
 
-                # optional small rotation
-                if random.random() < 0.3:
-                    card_resized = card_resized.rotate(
-                        random.uniform(-10, 10), expand=True
-                    )
+            labels: list[str] = []
+            placed_any = False
 
-                # ensure fits, recompute dims
-                nw, nh = card_resized.size
-                if nw >= cw:
-                    nw = cw - 1
-                if nh >= ch:
-                    nh = ch - 1
-
-                max_x = cw - nw
-                max_y = ch - nh
-                if max_x <= 0 or max_y <= 0:
-                    x = 0
-                    y = 0
-                else:
-                    x = random.randint(0, max_x)
-                    y = random.randint(0, max_y)
-
-                # paste using alpha if present
-                paste_img = card_resized.convert("RGBA")
-                canvas_rgb = PILImage.new("RGB", (cw, ch), (114, 114, 114))
-                canvas_rgb.paste(bg, (0, 0))
-                canvas_rgb.paste(paste_img.convert("RGBA"), (x, y), paste_img)
-
-                # classification / detection label id
+            for j in range(num_cards):
+                card_path = random.choice(cards)
                 try:
-                    classname = resolve_class_name(card_path, label_map)
-                except KeyError:
-                    # fallback to infer_label_name
-                    classname = infer_label_name(card_path)
-                    if classname not in label_map:
-                        logger.debug(
-                            "Skipping card %s; class %s not in label_map",
-                            card_path,
-                            classname,
+                    with PILImage.open(card_path) as cimg:
+                        card = cimg.convert("RGBA")
+
+                        # scale to fit canvas if needed
+                        scale = random.uniform(*scale_range)
+                        nw = max(1, int(round(card.width * scale)))
+                        nh = max(1, int(round(card.height * scale)))
+                        if nw > cw or nh > ch:
+                            fit_scale = min(cw / card.width, ch / card.height) * 0.95
+                            nw = max(1, int(round(card.width * fit_scale)))
+                            nh = max(1, int(round(card.height * fit_scale)))
+                        card_resized = card.resize(
+                            (nw, nh), PILImage.Resampling.LANCZOS
                         )
-                        continue
-                class_id = label_map[classname]
 
-                # bbox in pixels
-                x_min, y_min = x, y
-                x_max, y_max = x + nw, y + nh
+                        # optional small rotation
+                        if random.random() < 0.3:
+                            card_resized = card_resized.rotate(
+                                random.uniform(-10, 10), expand=True
+                            )
 
-                # normalized YOLO format
-                cx = (x_min + x_max) / 2.0 / cw
-                cy = (y_min + y_max) / 2.0 / ch
-                w_norm = (x_max - x_min) / cw
-                h_norm = (y_max - y_min) / ch
+                        nw, nh = card_resized.size
+                        # ensure fits, recompute dims
+                        if nw >= cw:
+                            nw = cw - 1
+                        if nh >= ch:
+                            nh = ch - 1
 
-                fname = f"syn_val_{i:06d}.jpg"
-                img_path = output_dir / "images" / "val" / fname
-                lbl_path = output_dir / "labels" / "val" / (Path(fname).stem + ".txt")
+                        max_x = cw - nw
+                        max_y = ch - nh
+                        if max_x <= 0 or max_y <= 0:
+                            x = 0
+                            y = 0
+                        else:
+                            x = random.randint(0, max_x)
+                            y = random.randint(0, max_y)
 
-                canvas_rgb.save(img_path, quality=90)
-                lbl_path.write_text(
-                    f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n"
-                )
+                        # paste using alpha if present
+                        paste_img = card_resized.convert("RGBA")
+                        canvas_rgb.paste(paste_img.convert("RGBA"), (x, y), paste_img)
 
-                written += 1
+                        # classification / detection label id
+                        try:
+                            classname = resolve_class_name(card_path, label_map)
+                        except KeyError:
+                            # fallback to infer_label_name
+                            classname = infer_label_name(card_path)
+                            if classname not in label_map:
+                                logger.debug(
+                                    "Skipping card %s; class %s not in label_map",
+                                    card_path,
+                                    classname,
+                                )
+                                continue
+                        class_id = label_map[classname]
+
+                        # bbox in pixels
+                        x_min, y_min = x, y
+                        x_max, y_max = x + nw, y + nh
+
+                        # normalized YOLO format
+                        cx = (x_min + x_max) / 2.0 / cw
+                        cy = (y_min + y_max) / 2.0 / ch
+                        w_norm = (x_max - x_min) / cw
+                        h_norm = (y_max - y_min) / ch
+
+                        labels.append(
+                            f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}"
+                        )
+                        placed_any = True
+
+                except Exception as ex_card:
+                    logger.debug(
+                        "Failed to place card %s in sample %d: %s",
+                        card_path,
+                        i,
+                        ex_card,
+                    )
+                    continue
+
+            if not placed_any:
+                # nothing placed, skip writing this sample
+                continue
+
+            fname = f"syn_val_{i:06d}.jpg"
+            img_path = output_dir / "images" / "val" / fname
+            lbl_path = output_dir / "labels" / "val" / (Path(fname).stem + ".txt")
+
+            canvas_rgb.save(img_path, quality=90)
+            lbl_path.write_text("\n".join(labels) + "\n")
+
+            written += 1
 
         except Exception as ex:
             logger.debug("Failed to create synthetic sample %d: %s", i, ex)
