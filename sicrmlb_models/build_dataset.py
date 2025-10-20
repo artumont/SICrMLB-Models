@@ -3,7 +3,7 @@ import argparse
 import random
 import threading
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 from PIL.Image import Image
 from PIL import Image as PILImage
 import numpy as np
@@ -24,6 +24,14 @@ IMAGE_VARIANTS = [
     Variants.ORIGINAL,
 ]
 
+
+def get_random_color() -> Tuple[int, int, int]:
+    """Generate a random RGB color."""
+    return (
+        random.randint(0, 255),
+        random.randint(0, 255),
+        random.randint(0, 255),
+    )
 
 def letterbox_image(image_path: Path, target_size: ImageSize) -> Image:
     """Resize image with unchanged aspect ratio using padding."""
@@ -107,8 +115,12 @@ def worker_task(
     output_dir: Path,
     label_map: Dict[str, int],
     variants: list[Variants] = IMAGE_VARIANTS,
+    instances_per_variant: int = 1,
 ) -> None:
     """Worker task to process images and generate variants."""
+    # variants may be passed positionally from threaded args; ensure it's iterable
+    if not hasattr(variants, "__iter__") or isinstance(variants, (int, float)):
+        variants = IMAGE_VARIANTS
     for img_path in paths:
         try:
             img_out_path = output_dir / "images" / "train"
@@ -169,7 +181,7 @@ def worker_task(
                     x = random.randint(0, max_x)
                     y = random.randint(0, max_y)
 
-                canvas = PILImage.new("RGB", (cw, ch), (114, 114, 114))
+                canvas = PILImage.new("RGB", (cw, ch), get_random_color())
                 paste_img = placed.convert("RGBA")
                 canvas.paste(paste_img, (x, y), paste_img)
 
@@ -191,20 +203,24 @@ def worker_task(
             stem = img_path.stem
 
             # create and save each requested variant using random placement
+            def place_multiple(stem: str, base_suffix: str, variant_img: PILImage.Image):
+                for inst_idx in range(instances_per_variant):
+                    place_and_save(stem, f"{base_suffix}_{inst_idx}", variant_img)
+
             if Variants.ORIGINAL in variants:
-                place_and_save(stem, "_original", card)
+                place_multiple(stem, "_original", card)
             if Variants.BRIGHT in variants:
                 bright = PILImage.eval(card.convert("RGB"), lambda v: min(255, int(v * 1.2))).convert("RGBA")
-                place_and_save(stem, "_bright", bright)
+                place_multiple(stem, "_bright", bright)
             if Variants.GRAYSCALE in variants:
                 gray = card.convert("L").convert("RGBA")
-                place_and_save(stem, "_grayscale", gray)
+                place_multiple(stem, "_grayscale", gray)
             if Variants.CONTRAST in variants:
                 contrast = PILImage.eval(card.convert("RGB"), lambda v: min(255, max(0, int(128 + 1.5 * (v - 128))))).convert("RGBA")
-                place_and_save(stem, "_contrast", contrast)
+                place_multiple(stem, "_contrast", contrast)
             if Variants.COMBINED in variants:
                 combined = PILImage.eval(card.convert("RGB"), lambda v: min(255, max(0, int(128 + 1.5 * (v - 128) * 1.2)))).convert("RGBA")
-                place_and_save(stem, "_combined", combined)
+                place_multiple(stem, "_combined", combined)
 
             logger.info(f"Worker {worker_id} processed {img_path.stem} successfully.")
 
@@ -295,9 +311,6 @@ def generate_synthetic_val(
             else:
                 bg = PILImage.new("RGB", (cw, ch), (114, 114, 114))
 
-            # allow multiple cards per synthetic sample
-            num_cards = random.randint(1, 3)
-
             # start canvas and paste background
             canvas_rgb = PILImage.new("RGB", (cw, ch), (114, 114, 114))
             canvas_rgb.paste(bg, (0, 0))
@@ -305,88 +318,87 @@ def generate_synthetic_val(
             labels: list[str] = []
             placed_any = False
 
-            for j in range(num_cards):
-                card_path = random.choice(cards)
-                try:
-                    with PILImage.open(card_path) as cimg:
-                        card = cimg.convert("RGBA")
+            card_path = random.choice(cards)
+            try:
+                with PILImage.open(card_path) as cimg:
+                    card = cimg.convert("RGBA")
 
-                        # scale to fit canvas if needed
-                        scale = random.uniform(*scale_range)
-                        nw = max(1, int(round(card.width * scale)))
-                        nh = max(1, int(round(card.height * scale)))
-                        if nw > cw or nh > ch:
-                            fit_scale = min(cw / card.width, ch / card.height) * 0.95
-                            nw = max(1, int(round(card.width * fit_scale)))
-                            nh = max(1, int(round(card.height * fit_scale)))
-                        card_resized = card.resize(
-                            (nw, nh), PILImage.Resampling.LANCZOS
-                        )
-
-                        # optional small rotation
-                        if random.random() < 0.3:
-                            card_resized = card_resized.rotate(
-                                random.uniform(-10, 10), expand=True
-                            )
-
-                        nw, nh = card_resized.size
-                        # ensure fits, recompute dims
-                        if nw >= cw:
-                            nw = cw - 1
-                        if nh >= ch:
-                            nh = ch - 1
-
-                        max_x = cw - nw
-                        max_y = ch - nh
-                        if max_x <= 0 or max_y <= 0:
-                            x = 0
-                            y = 0
-                        else:
-                            x = random.randint(0, max_x)
-                            y = random.randint(0, max_y)
-
-                        # paste using alpha if present
-                        paste_img = card_resized.convert("RGBA")
-                        canvas_rgb.paste(paste_img.convert("RGBA"), (x, y), paste_img)
-
-                        # classification / detection label id
-                        try:
-                            classname = resolve_class_name(card_path, label_map)
-                        except KeyError:
-                            # fallback to infer_label_name
-                            classname = infer_label_name(card_path)
-                            if classname not in label_map:
-                                logger.debug(
-                                    "Skipping card %s; class %s not in label_map",
-                                    card_path,
-                                    classname,
-                                )
-                                continue
-                        class_id = label_map[classname]
-
-                        # bbox in pixels
-                        x_min, y_min = x, y
-                        x_max, y_max = x + nw, y + nh
-
-                        # normalized YOLO format
-                        cx = (x_min + x_max) / 2.0 / cw
-                        cy = (y_min + y_max) / 2.0 / ch
-                        w_norm = (x_max - x_min) / cw
-                        h_norm = (y_max - y_min) / ch
-
-                        labels.append(
-                            f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}"
-                        )
-                        placed_any = True
-
-                except Exception as ex_card:
-                    logger.debug(
-                        "Failed to place card %s in sample %d: %s",
-                        card_path,
-                        i,
-                        ex_card,
+                    # scale to fit canvas if needed
+                    scale = random.uniform(*scale_range)
+                    nw = max(1, int(round(card.width * scale)))
+                    nh = max(1, int(round(card.height * scale)))
+                    if nw > cw or nh > ch:
+                        fit_scale = min(cw / card.width, ch / card.height) * 0.95
+                        nw = max(1, int(round(card.width * fit_scale)))
+                        nh = max(1, int(round(card.height * fit_scale)))
+                    card_resized = card.resize(
+                        (nw, nh), PILImage.Resampling.LANCZOS
                     )
-                    continue
+
+                    # optional small rotation
+                    if random.random() < 0.3:
+                        card_resized = card_resized.rotate(
+                            random.uniform(-10, 10), expand=True
+                        )
+
+                    nw, nh = card_resized.size
+                    # ensure fits, recompute dims
+                    if nw >= cw:
+                        nw = cw - 1
+                    if nh >= ch:
+                        nh = ch - 1
+
+                    max_x = cw - nw
+                    max_y = ch - nh
+                    if max_x <= 0 or max_y <= 0:
+                        x = 0
+                        y = 0
+                    else:
+                        x = random.randint(0, max_x)
+                        y = random.randint(0, max_y)
+
+                    # paste using alpha if present
+                    paste_img = card_resized.convert("RGBA")
+                    canvas_rgb.paste(paste_img.convert("RGBA"), (x, y), paste_img)
+
+                    # classification / detection label id
+                    try:
+                        classname = resolve_class_name(card_path, label_map)
+                    except KeyError:
+                        # fallback to infer_label_name
+                        classname = infer_label_name(card_path)
+                        if classname not in label_map:
+                            logger.debug(
+                                "Skipping card %s; class %s not in label_map",
+                                card_path,
+                                classname,
+                            )
+                            continue
+                    class_id = label_map[classname]
+
+                    # bbox in pixels
+                    x_min, y_min = x, y
+                    x_max, y_max = x + nw, y + nh
+
+                    # normalized YOLO format
+                    cx = (x_min + x_max) / 2.0 / cw
+                    cy = (y_min + y_max) / 2.0 / ch
+                    w_norm = (x_max - x_min) / cw
+                    h_norm = (y_max - y_min) / ch
+
+                    labels.append(
+                        f"{class_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}"
+                    )
+                    placed_any = True
+
+            except Exception as ex_card:
+                logger.debug(
+                    "Failed to place card %s in sample %d: %s",
+                    card_path,
+                    i,
+                    ex_card,
+                )
+                continue
 
             if not placed_any:
                 # nothing placed, skip writing this sample
@@ -416,6 +428,7 @@ def build_dataset(
     raw_data_path: Path,
     output_dir: Path,
     num_workers: int = 4,
+    instances_per_variant: int = 1,
 ) -> None:
     """Build dataset from raw images located in raw_data_path and save to output_dir."""
     logger.info(f"Building dataset '{dataset_name}' from raw data at {raw_data_path}")
@@ -439,6 +452,7 @@ def build_dataset(
         thread = threading.Thread(
             target=worker_task,
             args=(image_paths, worker_idx + 1, output_dir, label_map),
+            kwargs={"instances_per_variant": instances_per_variant},
         )
         thread.start()
         worker_threads.append(thread)
@@ -510,6 +524,13 @@ def parse_args():
         default=4,
         help="Number of worker threads for data processing.",
     )
+    parser.add_argument(
+        "-ipc",
+        "--instances-per-variant",
+        type=int,
+        default=10,
+        help="Number of instances to generate per variant per image.",
+    )
     return parser.parse_args()
 
 
@@ -523,4 +544,10 @@ if __name__ == "__main__":
         logger.error(f"Raw data path does not exist: {args.raw_data_path}")
         raise FileNotFoundError(f"Raw data path does not exist: {args.raw_data_path}")
 
-    build_dataset(args.dataset_name, args.raw_data_path, output_dir)
+    build_dataset(
+        args.dataset_name,
+        args.raw_data_path,
+        output_dir,
+        num_workers=args.num_workers,
+        instances_per_variant=args.instances_per_variant,
+    )
